@@ -24,11 +24,22 @@ export default async function handler(req, res) {
     const body = { systemInstruction: { parts: [{ text: instruction }] }, contents, generationConfig: { temperature: 0.7, maxOutputTokens: 4096 } };
     if (tool === 'research') body.tools = [{ google_search: {} }];
     const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY }, body: JSON.stringify(body)
-    });
-    const data = await response.json();
-    if (!response.ok) return res.status(response.status).json({ error: data?.error?.message || 'Gemini request failed.' });
+    let response;
+    let data;
+    // Gemini's 503 response is temporary overload. Retry once with a short
+    // backoff, while leaving invalid keys and malformed requests untouched.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY }, body: JSON.stringify(body)
+      });
+      data = await response.json();
+      if (response.status !== 503 || attempt === 1) break;
+      await new Promise(resolve => setTimeout(resolve, 800));
+    }
+    if (!response.ok) {
+      console.error('Gemini API error:', response.status, data?.error?.message || 'Unknown error');
+      return res.status(response.status).json({ error: data?.error?.message || 'Gemini request failed.' });
+    }
     const candidate = data.candidates?.[0];
     const responseText = candidate?.content?.parts?.map(p => p.text || '').join('') || '';
     if (!responseText) return res.status(502).json({ error: 'The model returned no text.' });
